@@ -63,6 +63,7 @@
 #include <functional>
 #include <fstream>
 #include <unordered_map>
+#include <sys/system_properties.h>
 
 #if defined(OCULUSVR) && defined(STORE_BUILD)
 #include "OVR_Platform.h"
@@ -93,6 +94,34 @@ const float kPointerSize = 3.0;
 
 // When moving windows, the minimum amount of movement required to start moving the window
 float kWindowMoveZThreshold = 0.01;
+
+// Decides how WebXR frames are paced against the device frame loop.
+//
+// With ONE_FRAME_AHEAD the engine renders frame N+1 while frame N is being displayed, using a
+// pose predicted for the display time of the *next* device frame. That gives the engine a whole
+// frame to render, but the pose is predicted ~1 frame further than for native content (~31ms vs
+// ~20ms on PICO 4 at 90Hz), which is perceived as the view lagging behind head motion.
+//
+// Chromium hands each frame over through a blocking SyncState handshake with ExternalVR, so it
+// can render within the same device frame it is displayed in (the same pacing as Chromium's own
+// OpenXR backend: wait frame -> pose -> render -> end frame). Gecko keeps the pipelined mode.
+// `adb shell setprop debug.wolvic.xr.frame_ahead 1|0` overrides the default for A/B testing.
+bool
+ShouldPipelineWebXRFrames(const crow::DeviceDelegatePtr& aDevice) {
+  if (!aDevice->SupportsFramePrediction(crow::DeviceDelegate::FramePrediction::ONE_FRAME_AHEAD)) {
+    return false;
+  }
+#if CHROMIUM
+  bool pipeline = false;
+#else
+  bool pipeline = true;
+#endif
+  char value[PROP_VALUE_MAX] = {};
+  if (__system_property_get("debug.wolvic.xr.frame_ahead", value) > 0) {
+    pipeline = value[0] == '1';
+  }
+  return pipeline;
+}
 
 class SurfaceObserver;
 typedef std::shared_ptr<SurfaceObserver> SurfaceObserverPtr;
@@ -209,6 +238,10 @@ struct BrowserWorld::State {
   WebXRInterstialState webXRInterstialState;
   vrb::Matrix widgetsYaw;
   bool wasWebXRRendering = false;
+  // Whether WebXR frames are pipelined (rendered with poses predicted one frame ahead and
+  // displayed on the next tick) instead of being rendered and displayed within the same tick.
+  // Only changed while the page is not rendering, see TickImmersive().
+  bool webXRFrameAhead = false;
   double lastBatteryLevelUpdate = -1.0;
   bool reorientRequested = false;
   LockMode lockMode = LockMode::NO_LOCK;
@@ -1947,9 +1980,17 @@ BrowserWorld::TickImmersive() {
   m.device->SetImmersiveBlendMode(m.externalVR->GetImmersiveBlendMode());
   m.device->SetImmersiveXRSessionType(m.externalVR->GetImmersiveXRSessionType());
 
-  const bool supportsFrameAhead = m.device->SupportsFramePrediction(DeviceDelegate::FramePrediction::ONE_FRAME_AHEAD);
+  const bool renderingWebXR = m.externalVR->GetVRState() == ExternalVR::VRState::Rendering &&
+                              m.webXRInterstialState == WebXRInterstialState::HIDDEN;
+  if (!renderingWebXR) {
+    // Only switch the frame pacing while the page is not rendering. Switching from the same-tick
+    // mode to the pipelined one mid-stream would stall the engine's SyncState handshake (it waits
+    // for poses that the pipelined mode only pushes after the frame result arrives).
+    m.webXRFrameAhead = ShouldPipelineWebXRFrames(m.device);
+  }
+  const bool supportsFrameAhead = m.webXRFrameAhead;
   auto framePrediction = DeviceDelegate::FramePrediction::ONE_FRAME_AHEAD;
-  if (!supportsFrameAhead || (m.externalVR->GetVRState() != ExternalVR::VRState::Rendering) || m.webXRInterstialState != WebXRInterstialState::HIDDEN) {
+  if (!supportsFrameAhead || !renderingWebXR) {
       // Do not use one frame ahead prediction if not supported or we are rendering the spinner.
       framePrediction = DeviceDelegate::FramePrediction::NO_FRAME_AHEAD;
       m.device->StartFrame(framePrediction);

@@ -4,7 +4,7 @@
 # tens of GB), so this workflow consumes a prebuilt engine bundle published as a
 # release asset in WebXR-JP/wolvic-chromium and only builds the Android app.
 #
-# To publish a new engine bundle, see HANDOFF.md section 9.
+# To publish a new engine bundle, see HANDOFF.md section 10.
 
 name: Build PICO (WebGPU)
 

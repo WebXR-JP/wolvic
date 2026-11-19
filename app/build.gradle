@@ -264,7 +264,7 @@ android {
             externalNativeBuild {
                 cmake {
                     cppFlags " -DPICOXR -DOPENXR -I" + file("src/openxr/cpp").absolutePath
-                    arguments "-DVR_SDK_LIB=picoxr-lib", "-DPICOXR=ON", "-DOPENXR=ON"
+                    arguments "-DVR_SDK_LIB=picoxr-lib", "-DPICOXR=ON", "-DOPENXR=ON", "-DOpenXR_DIR=" + project.file("../third_party/picoxr/cmake").absolutePath
                 }
             }
         }
@@ -405,6 +405,10 @@ android {
         // Stores flavor
         generic {
             dimension = "store"
+            // Allow sideloading next to the store build during development.
+            if (project.hasProperty("wolvicDevSuffix")) {
+                applicationIdSuffix = ".dev"
+            }
         }
 
         metaStore {

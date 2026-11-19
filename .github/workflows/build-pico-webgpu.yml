@@ -1,0 +1,113 @@
+# Build the PICO 4 (picoxr / arm64 / chromium) debug APK on GitHub-hosted runners.
+#
+# The Chromium engine cannot be built on a hosted runner (the checkout alone is
+# tens of GB), so this workflow consumes a prebuilt engine bundle published as a
+# release asset in WebXR-JP/wolvic-chromium and only builds the Android app.
+#
+# To publish a new engine bundle, see HANDOFF.md section 9.
+
+name: Build PICO (WebGPU)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wvr-webgpu]
+  pull_request:
+    branches: [wvr-webgpu]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-pico-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ENGINE_REPO: WebXR-JP/wolvic-chromium
+  ENGINE_RELEASE: engine-m150-webgpu-20261119
+  ENGINE_ASSET: wolvic-engine-m150-webgpu-20261119.tar.gz
+  ENGINE_SHA256: 79f7e29c090d181212456635a87e37b35e54e3647af35eaba2b93c0e6f967252
+  GRADLE_TASK: assemblePicoxrArm64ChromiumGenericDebug
+
+jobs:
+  build:
+    name: PICO 4 / arm64 / chromium / debug
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout app
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # Keep these in sync with the toolchain used for the local build
+      # (see bin/container/_env.sh and HANDOFF.md).
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.0.12077973" \
+            "cmake;3.22.1"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Download prebuilt engine
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/${ENGINE_ASSET}"
+          mkdir -p "$RUNNER_TEMP/engine"
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://github.com/${ENGINE_REPO}/releases/download/${ENGINE_RELEASE}/${ENGINE_ASSET}"
+          echo "${ENGINE_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP/engine" --strip-components=1
+          cat "$RUNNER_TEMP/engine/BUILD-INFO.txt"
+
+      - name: Install engine into app tree
+        run: |
+          set -euo pipefail
+          engine="$RUNNER_TEMP/engine"
+
+          # chromiumImplementation fileTree(dir: localProperties.chromium_aar)
+          mkdir -p "$RUNNER_TEMP/chromium-aar"
+          cp "$engine/Content.aar" "$engine/ChromiumUi.aar" "$RUNNER_TEMP/chromium-aar/"
+
+          # Runtime assets packed into app/src/chromium/assets.
+          mkdir -p app/src/chromium/assets
+          cp "$engine/wolvic.pak" "$engine/icudtl.dat" app/src/chromium/assets/
+          cp "$engine/snapshot_blob.bin" app/src/chromium/assets/snapshot_blob_64.bin
+
+          # PICO OpenXR loader + headers (third_party is not tracked).
+          mkdir -p third_party
+          rm -rf third_party/picoxr
+          cp -a "$engine/picoxr" third_party/picoxr
+
+          # local.properties is gitignored; Gradle reads chromium_aar from it.
+          printf 'sdk.dir=%s\nchromium_aar=%s\n' \
+            "$ANDROID_SDK_ROOT" "$RUNNER_TEMP/chromium-aar" > local.properties
+
+          ls -lh "$RUNNER_TEMP/chromium-aar" third_party/picoxr/libs/android.arm64-v8a
+
+      - name: Build APK
+        run: ./gradlew --no-daemon --stacktrace -PwolvicDevSuffix "$GRADLE_TASK"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: wolvic-picoxr-arm64-chromium-webgpu-debug
+          path: app/build/outputs/apk/picoxrArm64ChromiumGeneric/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
